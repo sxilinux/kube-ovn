@@ -17,6 +17,9 @@ import (
 	exec "os/exec"
 	"strings"
 	"syscall"
+	"time"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/fields"
 )
 
 const (
@@ -24,12 +27,14 @@ const (
 	EnvPodName      = "POD_NAME"
 	EnvPodNameSpace = "POD_NAMESPACE"
 	OvnNorthdPid    = "/var/run/ovn/ovn-northd.pid"
+	EnvNodeName     = "NODE"
 )
 
 // Configuration is the controller conf
 type Configuration struct {
 	KubeConfigFile string
 	KubeClient     kubernetes.Interface
+	ProbeInterval  int    
 }
 
 // ParseFlags parses cmd args then init kubeclient and conf
@@ -37,13 +42,14 @@ type Configuration struct {
 func ParseFlags() (*Configuration, error) {
 	var (
 		argKubeConfigFile = pflag.String("kubeconfig", "", "Path to kubeconfig file with authorization and master location information. If not set use the inCluster token.")
+		argProbeInterval  = pflag.Int("probeInterval", 3000, "interval of probing leader: ms unit")
 	)
 
 	pflag.Parse()
 	config := &Configuration{
 		KubeConfigFile: *argKubeConfigFile,
+		ProbeInterval: *argProbeInterval,
 	}
-
 	return config, nil
 }
 
@@ -322,63 +328,83 @@ func compactDataBase(ctrlSock string) {
 }
 
 func OvnLeaderCheck(cfg *Configuration) error {
-
-	podName := os.Getenv(EnvPodName)
 	podNamespace := os.Getenv(EnvPodNameSpace)
-
-	if podName == "" || podNamespace == "" {
-		return fmt.Errorf("env variables POD_NAME and POD_NAMESPACE must be set")
+	nodeName :=  os.Getenv(EnvNodeName)
+	if nodeName == "" || podNamespace == "" {
+		return fmt.Errorf("env variables POD_NAMESPACE or EnvNodeName must be set")
 	}
-	pod, err := cfg.KubeClient.CoreV1().Pods(podNamespace).Get(context.Background(), podName, metav1.GetOptions{})
-	if err != nil {
-		klog.Errorf("get pod %v namespace %v error %v", podName, podNamespace, err)
-		return err
-	}
-
-	labels := pod.ObjectMeta.Labels
-	alive := checkOvnisAlive()
-	if !alive {
-		return fmt.Errorf("ovn is not alive")
-	}
-
-	//clone  pod labels
-	modify_labels := make(map[string]string)
-	for k, v := range labels {
-		modify_labels[k] = v
-	}
-
-	klog.Infof("OvnLeaderCheck clonedlabels %+v \n", modify_labels)
-	var needUpdate bool = false
-	isleader := checkNbIsLeader()
-	res := tryUpdateLabel(labels, "ovn-nb-leader", isleader, modify_labels)
-	if res {
-		needUpdate = true
-	}
-
-	//update pod labels
-	isleader = checkNorthdActive()
-	tryUpdateLabel(labels, "ovn-northd-leader", isleader, modify_labels)
-
-	isleader = checkSbIsLeader()
-	res = tryUpdateLabel(labels, "ovn-sb-leader", isleader, modify_labels)
-	if res {
-		needUpdate = true
-	}
-
-	if needUpdate {
-		klog.Infof("OvnLeaderCheck need replace labels %+v \n", modify_labels)
-		err = patchPodLabels(cfg, pod, modify_labels)
+	selectLabels := make(map[string]string)
+	selectLabels["app"] = "ovn-central"
+	for {
+		podList, err := cfg.KubeClient.CoreV1().Pods(podNamespace).List(
+			context.Background(),
+			metav1.ListOptions{
+				FieldSelector: fields.SelectorFromSet(fields.Set{"spec.nodeName": nodeName}).String(),
+				LabelSelector: labels.SelectorFromSet(selectLabels).String(),
+			},
+		)
 		if err != nil {
-			klog.Errorf("patch label error %v", err)
-			return err
+			klog.Errorf("get pod list nodeName  %v namespace %v error %v", nodeName, podNamespace, err)
+			continue
 		}
-	}
+		if len(podList.Items) == 0 {
+			// No pod yet, retry
+			klog.Errorf("get pod list nodeName  %v namespace %v not ready yet ", nodeName, podNamespace)
+			continue
+		}
+		if len(podList.Items) > 1 {
+			// Multiple pods, stop waiting
+			klog.Errorf("Getting multiple pod with label %v on node %s", selectLabels, nodeName)
+			continue
+		}
+		
+		pod := podList.Items[0]
+		labels := pod.ObjectMeta.Labels
+		alive := checkOvnisAlive()
+		if !alive {
+			klog.Errorf("ovn is not alive")
+			continue
+		}
+		
+		//clone  pod labels
+		modify_labels := make(map[string]string)
+		for k, v := range labels {
+			modify_labels[k] = v
+		}
 
-	res = checkNorthdSvcValidIP(cfg, podNamespace, "ovn-northd")
-	if !res {
-		stealLock()
+		klog.Infof("OvnLeaderCheck clonedlabels %+v \n", modify_labels)
+		var needUpdate bool = false
+		isleader := checkNbIsLeader()
+		res := tryUpdateLabel(labels, "ovn-nb-leader", isleader, modify_labels)
+		if res {
+			needUpdate = true
+		}
+
+		//update pod labels
+		isleader = checkNorthdActive()
+		tryUpdateLabel(labels, "ovn-northd-leader", isleader, modify_labels)
+
+		isleader = checkSbIsLeader()
+		res = tryUpdateLabel(labels, "ovn-sb-leader", isleader, modify_labels)
+		if res {
+			needUpdate = true
+		}
+		if needUpdate {
+			klog.Infof("OvnLeaderCheck need replace labels %+v \n", modify_labels)
+			err = patchPodLabels(cfg, &pod, modify_labels)
+			if err != nil {
+				klog.Errorf("patch label error %v", err)
+				continue
+			}
+		}
+		res = checkNorthdSvcValidIP(cfg, podNamespace, "ovn-northd")
+		if !res {
+			stealLock()
+		}
+		compactDataBase("/var/run/ovn/ovnnb_db.ctl")
+		compactDataBase("/var/run/ovn/ovnsb_db.ctl")
+		time.Sleep(time.Duration(cfg.ProbeInterval) * time.Millisecond)
 	}
-	compactDataBase("/var/run/ovn/ovnnb_db.ctl")
-	compactDataBase("/var/run/ovn/ovnsb_db.ctl")
+	
 	return nil
 }
