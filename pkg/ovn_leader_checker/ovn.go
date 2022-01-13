@@ -27,7 +27,7 @@ const (
 	EnvPodName      = "POD_NAME"
 	EnvPodNameSpace = "POD_NAMESPACE"
 	OvnNorthdPid    = "/var/run/ovn/ovn-northd.pid"
-	EnvNodeName     = "NODE"
+	EnvNodeName     = "KUBE_NODE_NAME"
 )
 
 // Configuration is the controller conf
@@ -42,7 +42,7 @@ type Configuration struct {
 func ParseFlags() (*Configuration, error) {
 	var (
 		argKubeConfigFile = pflag.String("kubeconfig", "", "Path to kubeconfig file with authorization and master location information. If not set use the inCluster token.")
-		argProbeInterval  = pflag.Int("probeInterval", 3000, "interval of probing leader: ms unit")
+		argProbeInterval  = pflag.Int("probeInterval", 5000, "interval of probing leader: ms unit")
 	)
 
 	pflag.Parse()
