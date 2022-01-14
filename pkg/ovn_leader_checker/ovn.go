@@ -38,17 +38,16 @@ type Configuration struct {
 // ParseFlags parses cmd args then init kubeclient and conf
 // TODO: validate configuration
 func ParseFlags() (*Configuration, error) {
+	klog.InitFlags(nil)
 	var (
 		argKubeConfigFile = pflag.String("kubeconfig", "", "Path to kubeconfig file with authorization and master location information. If not set use the inCluster token.")
 		argProbeInterval  = pflag.Int("probeInterval", 15000, "interval of probing leader: ms unit")
 	)
-	
 	pflag.Parse()
 	config := &Configuration{
 		KubeConfigFile: *argKubeConfigFile,
 		ProbeInterval: *argProbeInterval,
 	}
-
 	return config, nil
 }
 
