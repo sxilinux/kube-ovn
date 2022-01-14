@@ -17,6 +17,7 @@ import (
 	exec "os/exec"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const (
@@ -24,12 +25,14 @@ const (
 	EnvPodName      = "POD_NAME"
 	EnvPodNameSpace = "POD_NAMESPACE"
 	OvnNorthdPid    = "/var/run/ovn/ovn-northd.pid"
+ 
 )
 
 // Configuration is the controller conf
 type Configuration struct {
 	KubeConfigFile string
 	KubeClient     kubernetes.Interface
+	ProbeInterval  int   
 }
 
 // ParseFlags parses cmd args then init kubeclient and conf
@@ -37,11 +40,13 @@ type Configuration struct {
 func ParseFlags() (*Configuration, error) {
 	var (
 		argKubeConfigFile = pflag.String("kubeconfig", "", "Path to kubeconfig file with authorization and master location information. If not set use the inCluster token.")
+		argProbeInterval  = pflag.Int("probeInterval", 5000, "interval of probing leader: ms unit")
 	)
-
+	
 	pflag.Parse()
 	config := &Configuration{
 		KubeConfigFile: *argKubeConfigFile,
+		ProbeInterval: *argProbeInterval,
 	}
 
 	return config, nil
@@ -321,14 +326,8 @@ func compactDataBase(ctrlSock string) {
 	}
 }
 
-func OvnLeaderCheck(cfg *Configuration) error {
 
-	podName := os.Getenv(EnvPodName)
-	podNamespace := os.Getenv(EnvPodNameSpace)
-
-	if podName == "" || podNamespace == "" {
-		return fmt.Errorf("env variables POD_NAME and POD_NAMESPACE must be set")
-	}
+func doOvnLeaderCheck(cfg *Configuration,  podName string, podNamespace string) error {
 	pod, err := cfg.KubeClient.CoreV1().Pods(podNamespace).Get(context.Background(), podName, metav1.GetOptions{})
 	if err != nil {
 		klog.Errorf("get pod %v namespace %v error %v", podName, podNamespace, err)
@@ -373,7 +372,7 @@ func OvnLeaderCheck(cfg *Configuration) error {
 			return err
 		}
 	}
-
+	
 	res = checkNorthdSvcValidIP(cfg, podNamespace, "ovn-northd")
 	if !res {
 		stealLock()
@@ -381,4 +380,17 @@ func OvnLeaderCheck(cfg *Configuration) error {
 	compactDataBase("/var/run/ovn/ovnnb_db.ctl")
 	compactDataBase("/var/run/ovn/ovnsb_db.ctl")
 	return nil
+	
 }
+func StartOvnLeaderCheck(cfg *Configuration) error {
+	podName := os.Getenv(EnvPodName)
+	podNamespace := os.Getenv(EnvPodNameSpace)
+	if podName == "" || podNamespace == "" {
+		return fmt.Errorf("env variables POD_NAME and POD_NAMESPACE must be set")
+	}
+	for {
+		doOvnLeaderCheck(cfg, podName , podNamespace);
+		time.Sleep(time.Duration(cfg.ProbeInterval) * time.Millisecond)
+	}
+}
+
