@@ -40,7 +40,7 @@ type Configuration struct {
 func ParseFlags() (*Configuration, error) {
 	var (
 		argKubeConfigFile = pflag.String("kubeconfig", "", "Path to kubeconfig file with authorization and master location information. If not set use the inCluster token.")
-		argProbeInterval  = pflag.Int("probeInterval", 5000, "interval of probing leader: ms unit")
+		argProbeInterval  = pflag.Int("probeInterval", 15000, "interval of probing leader: ms unit")
 	)
 	
 	pflag.Parse()
@@ -106,7 +106,7 @@ func checkOvnisAlive() bool {
 			klog.Errorf("CheckOvnisAlive: %s is not alive", process)
 			return false
 		}
-		klog.Infof("CheckOvnisAlive: %s is alive", process)
+		klog.V(5).Infof("CheckOvnisAlive: %s is alive", process)
 	}
 	return true
 }
@@ -144,7 +144,7 @@ func checkNbIsLeader() bool {
 		return false
 	}
 
-	klog.Infof("CheckNbIsLeader: output %s", string(output))
+	klog.V(5).Infof("CheckNbIsLeader: output %s", string(output))
 	result := strings.TrimSpace(string(output))
 	return strings.Contains(result, "true")
 }
@@ -181,7 +181,7 @@ func checkSbIsLeader() bool {
 		return false
 	}
 
-	klog.Infof("CheckSbIsLeader: output %s ", string(output))
+	klog.V(5).Infof("CheckSbIsLeader: output %s ", string(output))
 	result := strings.TrimSpace(string(output))
 	return strings.Contains(result, "true")
 }
@@ -215,7 +215,7 @@ func checkNorthdActive() bool {
 		return false
 	}
 
-	klog.Infof("checkNorthdActive: output %s  \n", string(output))
+	klog.V(5).Infof("checkNorthdActive: output %s  \n", string(output))
 	result := strings.TrimSpace(string(output))
 	return strings.Contains(result, "active")
 }
@@ -255,7 +255,7 @@ func stealLock() {
 	}
 
 	if len(output) > 0 {
-		klog.Infof("stealLock: output %s  \n", string(output))
+		klog.V(5).Infof("stealLock: output %s  \n", string(output))
 	}
 
 }
@@ -277,6 +277,15 @@ func patchPodLabels(cfg *Configuration, pod *v1.Pod, labels map[string]string) e
 	return err
 }
 
+
+func checkNorthdSvcExsit(cfg *Configuration, nameSpace string, svcName  string) bool{
+	_, err := cfg.KubeClient.CoreV1().Services(nameSpace).Get(context.Background(), svcName, metav1.GetOptions{})
+	if err != nil {
+		klog.Errorf("get svc %v namespace %v error %v", svcName, nameSpace, err)
+		return false
+	}
+	return true
+}
 func checkNorthdSvcValidIP(cfg *Configuration, nameSpace string, epName string) bool {
 	eps, err := cfg.KubeClient.CoreV1().Endpoints(nameSpace).Get(context.Background(), epName, metav1.GetOptions{})
 	if err != nil {
@@ -285,16 +294,16 @@ func checkNorthdSvcValidIP(cfg *Configuration, nameSpace string, epName string) 
 	}
 
 	if len(eps.Subsets) == 0 {
-		klog.Infof("epName %v has no address assigned", epName)
+		klog.V(5).Infof("epName %v has no address assigned", epName)
 		return false
 	}
 
 	if len(eps.Subsets[0].Addresses) == 0 {
-		klog.Infof("epName %v has no address assigned", epName)
+		klog.V(5).Infof("epName %v has no address assigned", epName)
 		return false
 	}
 
-	klog.Infof("epName %v address assigned %+v", epName, eps.Subsets[0].Addresses[0].IP)
+	klog.V(5).Infof("epName %v address assigned %+v", epName, eps.Subsets[0].Addresses[0].IP)
 	return true
 }
 
@@ -320,37 +329,40 @@ func compactDataBase(ctrlSock string) {
 		ctrlSock,
 		"ovsdb-server/compact",
 	}
-	_, err := exec.Command("ovn-appctl", command...).CombinedOutput()
-	if err != nil {
-		klog.Errorf("compactDataBase err %v", err)
+	
+	output, err := exec.Command("ovn-appctl", command...).CombinedOutput()
+	if len(output) > 0 {
+		klog.V(5).Infof("compactDataBase output %v ", string(output))
 	}
+	if err != nil {
+		klog.V(5).Infof("compactDataBase err %v", err)
+	}	
 }
 
 
-func doOvnLeaderCheck(cfg *Configuration,  podName string, podNamespace string) error {
+func doOvnLeaderCheck(cfg *Configuration,  podName string, podNamespace string) {
 	pod, err := cfg.KubeClient.CoreV1().Pods(podNamespace).Get(context.Background(), podName, metav1.GetOptions{})
 	if err != nil {
 		klog.Errorf("get pod %v namespace %v error %v", podName, podNamespace, err)
-		return err
+		return
 	}
 
 	labels := pod.ObjectMeta.Labels
-	alive := checkOvnisAlive()
-	if !alive {
-		return fmt.Errorf("ovn is not alive")
+	if !checkOvnisAlive() {
+		klog.Errorf("ovn is not alive")
+		return 
 	}
-
+	
 	//clone  pod labels
 	modify_labels := make(map[string]string)
 	for k, v := range labels {
 		modify_labels[k] = v
 	}
 
-	klog.Infof("OvnLeaderCheck clonedlabels %+v \n", modify_labels)
+	klog.V(5).Infof("OvnLeaderCheck clonedlabels %+v \n", modify_labels)
 	var needUpdate bool = false
 	isleader := checkNbIsLeader()
-	res := tryUpdateLabel(labels, "ovn-nb-leader", isleader, modify_labels)
-	if res {
+	if tryUpdateLabel(labels, "ovn-nb-leader", isleader, modify_labels) {
 		needUpdate = true
 	}
 
@@ -359,28 +371,25 @@ func doOvnLeaderCheck(cfg *Configuration,  podName string, podNamespace string) 
 	tryUpdateLabel(labels, "ovn-northd-leader", isleader, modify_labels)
 
 	isleader = checkSbIsLeader()
-	res = tryUpdateLabel(labels, "ovn-sb-leader", isleader, modify_labels)
-	if res {
+	if tryUpdateLabel(labels, "ovn-sb-leader", isleader, modify_labels) {
 		needUpdate = true
 	}
-
+	
 	if needUpdate {
-		klog.Infof("OvnLeaderCheck need replace labels %+v \n", modify_labels)
+		klog.V(5).Infof("OvnLeaderCheck need replace labels %+v \n", modify_labels)
 		err = patchPodLabels(cfg, pod, modify_labels)
 		if err != nil {
 			klog.Errorf("patch label error %v", err)
-			return err
+			return
 		}
-	}
-	
-	res = checkNorthdSvcValidIP(cfg, podNamespace, "ovn-northd")
-	if !res {
-		stealLock()
+	}	
+	if checkNorthdSvcExsit(cfg, podNamespace, "ovn-northd") {
+		if !checkNorthdSvcValidIP(cfg, podNamespace, "ovn-northd") {
+			stealLock()
+		} 		
 	}
 	compactDataBase("/var/run/ovn/ovnnb_db.ctl")
 	compactDataBase("/var/run/ovn/ovnsb_db.ctl")
-	return nil
-	
 }
 func StartOvnLeaderCheck(cfg *Configuration) error {
 	podName := os.Getenv(EnvPodName)
