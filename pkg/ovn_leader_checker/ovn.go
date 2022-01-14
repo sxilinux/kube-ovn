@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/spf13/pflag"
+	"flag"
 	"io/ioutil"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,11 +39,27 @@ type Configuration struct {
 // ParseFlags parses cmd args then init kubeclient and conf
 // TODO: validate configuration
 func ParseFlags() (*Configuration, error) {
-	klog.InitFlags(nil)
 	var (
 		argKubeConfigFile = pflag.String("kubeconfig", "", "Path to kubeconfig file with authorization and master location information. If not set use the inCluster token.")
 		argProbeInterval  = pflag.Int("probeInterval", 15000, "interval of probing leader: ms unit")
 	)
+	
+	klogFlags := flag.NewFlagSet("klog", flag.ExitOnError)
+	klog.InitFlags(klogFlags)
+	
+	// Sync the glog and klog flags.
+	flag.CommandLine.VisitAll(func(f1 *flag.Flag) {
+		f2 := klogFlags.Lookup(f1.Name)
+		if f2 != nil {
+			value := f1.Value.String()
+			if err := f2.Value.Set(value); err != nil {
+				klog.Fatalf("failed to set flag %v", err)
+			}
+		}
+	})
+	
+	pflag.CommandLine.AddGoFlagSet(klogFlags)
+	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
 	pflag.Parse()
 	config := &Configuration{
 		KubeConfigFile: *argKubeConfigFile,
