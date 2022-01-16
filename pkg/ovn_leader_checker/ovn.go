@@ -351,7 +351,7 @@ func compactDataBase(ctrlSock string) {
 		klog.V(5).Infof("compactDataBase output %v ", string(output))
 	}
 	if err != nil {
-		klog.V(5).Errorf("compactDataBase err %v", err)
+		klog.Errorf("compactDataBase err %v", err)
 	}	
 }
 
